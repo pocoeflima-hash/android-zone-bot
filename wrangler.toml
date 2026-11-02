@@ -1,0 +1,7 @@
+name = "androidzonehelperbot"
+main = "worker.js"
+compatibility_date = "2026-11-02"
+[[d1_databases]]
+binding = "DB"
+database_name = "android-zone-db"
+database_id = "45a8a196-cd0c-4def-bf7a-e539d2f8afbe"
