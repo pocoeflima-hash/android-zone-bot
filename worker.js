@@ -28,9 +28,6 @@ export default {
         const adminId = String(env.ADMIN_ID || "");
         const msg = (message.text || "").trim();
 
-        // =====================================
-        // DATABASE CHECK
-        // =====================================
         if (!env.DB) {
           await send(env, chatId, "❌ Database D1 belum terhubung.");
           return new Response("OK");
@@ -67,7 +64,6 @@ export default {
 
           } else {
             try {
-              // Hapus sesi upload lama milik admin
               await env.DB.prepare(
                 "DELETE FROM pending_uploads WHERE telegram_id = ?"
               ).bind(senderId).run();
@@ -288,7 +284,7 @@ export default {
 
             const result = await env.DB.prepare(
               `SELECT id, name, package_name, version,
-                      description, category, file_size
+                      description, category, file_size, icon_key
                FROM apps
                WHERE name LIKE ?
                   OR package_name LIKE ?
@@ -322,19 +318,7 @@ export default {
                   "Ukuran: " + size + "\n\n" +
                   (app.description || "Tidak ada deskripsi.");
 
-                await send(
-                  env,
-                  chatId,
-                  caption,
-                  {
-                    inline_keyboard: [[
-                      {
-                        text: "⬇️ Download APK",
-                        callback_data: "download_" + app.id
-                      }
-                    ]]
-                  }
-                );
+                await sendAppCard(env, chatId, app, caption);
               }
             }
 
@@ -423,7 +407,8 @@ export default {
         else if (q.data === "latest") {
           try {
             const result = await env.DB.prepare(
-              `SELECT id, name, category
+              `SELECT id, name, category, version,
+                      description, file_size, icon_key
                FROM apps
                ORDER BY created_at DESC
                LIMIT 10`
@@ -435,20 +420,16 @@ export default {
               await send(env, chatId, "Belum ada aplikasi tersedia.");
             } else {
               for (const app of apps) {
-                await send(
-                  env,
-                  chatId,
-                  "📱 " + app.name + "\n" +
-                  "Kategori: " + (app.category || "Uncategorized"),
-                  {
-                    inline_keyboard: [[
-                      {
-                        text: "⬇️ Download APK",
-                        callback_data: "download_" + app.id
-                      }
-                    ]]
-                  }
-                );
+                const caption =
+                  "📱 " + app.name + "\n\n" +
+                  "Kategori: " + (app.category || "Uncategorized") + "\n" +
+                  "Versi: " + (app.version || "Belum tersedia") + "\n" +
+                  "Ukuran: " + (app.file_size
+                    ? (app.file_size / (1024 * 1024)).toFixed(2) + " MB"
+                    : "Tidak diketahui") + "\n\n" +
+                  (app.description || "Tidak ada deskripsi.");
+
+                await sendAppCard(env, chatId, app, caption);
               }
             }
           } catch (error) {
@@ -545,6 +526,31 @@ async function finishUpload(env, chatId, pendingId) {
       "❌ Gagal menyimpan aplikasi. Data upload sementara masih dipertahankan."
     );
   }
+}
+
+// =====================================
+// KARTU APLIKASI DENGAN IKON
+// =====================================
+async function sendAppCard(env, chatId, app, caption) {
+  const keyboard = {
+    inline_keyboard: [[
+      {
+        text: "⬇️ Download APK",
+        callback_data: "download_" + app.id
+      }
+    ]]
+  };
+
+  if (app.icon_key) {
+    return telegram(env, "sendPhoto", {
+      chat_id: chatId,
+      photo: app.icon_key,
+      caption: caption.slice(0, 1024),
+      reply_markup: keyboard
+    });
+  }
+
+  return send(env, chatId, caption, keyboard);
 }
 
 // =====================================
