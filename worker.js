@@ -1,4 +1,3 @@
-
 export default {
   async fetch(request, env) {
     if (request.method === "GET") {
@@ -27,6 +26,94 @@ export default {
         const senderId = String(message.from?.id || "");
         const adminId = String(env.ADMIN_ID || "");
         const msg = (message.text || "").trim();
+
+        // =====================================
+        // WELCOME + CAPTCHA ANGGOTA BARU
+        // =====================================
+        if (
+          env.GROUP_ID &&
+          String(chatId) === String(env.GROUP_ID) &&
+          Array.isArray(message.new_chat_members)
+        ) {
+          for (const member of message.new_chat_members) {
+            // Jangan CAPTCHA bot lain
+            if (member.is_bot) continue;
+
+            try {
+              const captcha = createCaptcha();
+
+              // Batasi anggota baru sampai CAPTCHA selesai
+              await telegram(env, "restrictChatMember", {
+                chat_id: chatId,
+                user_id: member.id,
+                permissions: {
+                  can_send_messages: false,
+                  can_send_audios: false,
+                  can_send_documents: false,
+                  can_send_photos: false,
+                  can_send_videos: false,
+                  can_send_video_notes: false,
+                  can_send_voice_notes: false,
+                  can_send_polls: false,
+                  can_send_other_messages: false,
+                  can_add_web_page_previews: false
+                },
+                use_independent_chat_permissions: true
+              });
+
+              // Simpan jawaban CAPTCHA selama 5 menit
+              await env.DB.prepare(
+                `INSERT INTO captcha_users
+                 (chat_id, user_id, answer, expires_at)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(chat_id, user_id)
+                 DO UPDATE SET
+                   answer = excluded.answer,
+                   expires_at = excluded.expires_at`
+              ).bind(
+                String(chatId),
+                String(member.id),
+                String(captcha.answer),
+                Math.floor(Date.now() / 1000) + 300
+              ).run();
+
+              const firstName = member.first_name || "teman";
+
+              await send(
+                env,
+                chatId,
+                "👋 Selamat datang, " + firstName + "!\n\n" +
+                "Selamat datang di grup diskusi Apk Android Zone.\n\n" +
+                "🔐 Silakan selesaikan CAPTCHA berikut dalam 5 menit " +
+                "agar dapat mengirim pesan.\n\n" +
+                "Berapa hasil dari " + captcha.question + " ?",
+                {
+                  inline_keyboard: [
+                    captcha.options.map(option => ({
+                      text: String(option),
+                      callback_data:
+                        "captcha_" + member.id + "_" + option
+                    }))
+                  ]
+                }
+              );
+
+            } catch (error) {
+              console.error("Welcome CAPTCHA error:", error);
+
+              await send(
+                env,
+                chatId,
+                "⚠️ Halo " + (member.first_name || "teman") +
+                ", selamat datang di Apk Android Zone!\n\n" +
+                "Verifikasi otomatis sedang mengalami kendala. " +
+                "Silakan hubungi admin grup."
+              );
+            }
+          }
+
+          return new Response("OK");
+        }
 
         // =====================================
         // PERINTAH ID CHAT / GRUP
@@ -71,12 +158,16 @@ export default {
           const fileName = doc.file_name || "aplikasi.apk";
 
           if (senderId !== adminId) {
-            await send(env, chatId,
+            await send(
+              env,
+              chatId,
               "⛔ Fitur upload APK hanya tersedia untuk admin."
             );
 
           } else if (!/\.apk$/i.test(fileName)) {
-            await send(env, chatId,
+            await send(
+              env,
+              chatId,
               "❌ File ditolak. Silakan kirim file APK."
             );
 
@@ -356,6 +447,128 @@ export default {
       if (update.callback_query) {
         const q = update.callback_query;
         const chatId = q.message?.chat?.id;
+        const callbackData = q.data || "";
+
+        // =====================================
+        // VERIFIKASI CAPTCHA
+        // =====================================
+        if (callbackData.startsWith("captcha_")) {
+          const parts = callbackData.split("_");
+          const targetUserId = parts[1];
+          const selectedAnswer = parts[2];
+          const clickerId = String(q.from?.id || "");
+
+          // Hanya anggota yang sedang diverifikasi boleh menekan tombol
+          if (clickerId !== targetUserId) {
+            await telegram(env, "answerCallbackQuery", {
+              callback_query_id: q.id,
+              text: "❌ Tombol ini bukan untuk akun kamu.",
+              show_alert: true
+            });
+
+            return new Response("OK");
+          }
+
+          try {
+            const captchaRow = await env.DB.prepare(
+              `SELECT answer, expires_at
+               FROM captcha_users
+               WHERE chat_id = ? AND user_id = ?`
+            ).bind(
+              String(chatId),
+              String(targetUserId)
+            ).first();
+
+            if (!captchaRow) {
+              await telegram(env, "answerCallbackQuery", {
+                callback_query_id: q.id,
+                text: "CAPTCHA tidak ditemukan atau sudah digunakan.",
+                show_alert: true
+              });
+
+              return new Response("OK");
+            }
+
+            if (Math.floor(Date.now() / 1000) > captchaRow.expires_at) {
+              await env.DB.prepare(
+                `DELETE FROM captcha_users
+                 WHERE chat_id = ? AND user_id = ?`
+              ).bind(
+                String(chatId),
+                String(targetUserId)
+              ).run();
+
+              await telegram(env, "answerCallbackQuery", {
+                callback_query_id: q.id,
+                text: "⏰ CAPTCHA sudah kedaluwarsa. Minta admin untuk mencoba kembali.",
+                show_alert: true
+              });
+
+              return new Response("OK");
+            }
+
+            if (String(selectedAnswer) !== String(captchaRow.answer)) {
+              await telegram(env, "answerCallbackQuery", {
+                callback_query_id: q.id,
+                text: "❌ Jawaban salah. Silakan coba tombol lainnya.",
+                show_alert: true
+              });
+
+              return new Response("OK");
+            }
+
+            // Jawaban benar: buka akses anggota
+            await telegram(env, "restrictChatMember", {
+              chat_id: chatId,
+              user_id: Number(targetUserId),
+              permissions: {
+                can_send_messages: true,
+                can_send_audios: true,
+                can_send_documents: true,
+                can_send_photos: true,
+                can_send_videos: true,
+                can_send_video_notes: true,
+                can_send_voice_notes: true,
+                can_send_polls: true,
+                can_send_other_messages: true,
+                can_add_web_page_previews: true
+              },
+              use_independent_chat_permissions: true
+            });
+
+            await env.DB.prepare(
+              `DELETE FROM captcha_users
+               WHERE chat_id = ? AND user_id = ?`
+            ).bind(
+              String(chatId),
+              String(targetUserId)
+            ).run();
+
+            await telegram(env, "answerCallbackQuery", {
+              callback_query_id: q.id,
+              text: "✅ Verifikasi berhasil! Kamu sekarang bisa mengirim pesan."
+            });
+
+            await send(
+              env,
+              chatId,
+              "✅ Verifikasi berhasil!\n\n" +
+              "Selamat bergabung di Apk Android Zone. " +
+              "Sekarang kamu sudah bisa mengirim pesan."
+            );
+
+          } catch (error) {
+            console.error("CAPTCHA verification error:", error);
+
+            await telegram(env, "answerCallbackQuery", {
+              callback_query_id: q.id,
+              text: "Terjadi kesalahan saat verifikasi. Hubungi admin.",
+              show_alert: true
+            });
+          }
+
+          return new Response("OK");
+        }
 
         await telegram(env, "answerCallbackQuery", {
           callback_query_id: q.id
@@ -475,6 +688,33 @@ export default {
     }
   }
 };
+
+// =====================================
+// PEMBUAT CAPTCHA MATEMATIKA
+// =====================================
+function createCaptcha() {
+  const a = Math.floor(Math.random() * 8) + 2;
+  const b = Math.floor(Math.random() * 8) + 2;
+  const answer = a + b;
+
+  const options = new Set([answer]);
+
+  while (options.size < 3) {
+    const wrongAnswer = answer + Math.floor(Math.random() * 9) - 4;
+
+    if (wrongAnswer >= 2 && wrongAnswer !== answer) {
+      options.add(wrongAnswer);
+    }
+  }
+
+  const shuffledOptions = [...options].sort(() => Math.random() - 0.5);
+
+  return {
+    question: a + " + " + b,
+    answer,
+    options: shuffledOptions
+  };
+}
 
 // =====================================
 // SELESAIKAN UPLOAD
