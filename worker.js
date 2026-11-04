@@ -28,6 +28,24 @@ export default {
         const adminId = String(env.ADMIN_ID || "");
         const msg = (message.text || "").trim();
 
+        // =====================================
+        // PERINTAH ID CHAT / GRUP
+        // =====================================
+        if (
+          msg === "/id" ||
+          msg === "/id@AndroidZoneHelperBot"
+        ) {
+          await send(
+            env,
+            chatId,
+            "🆔 CHAT / GRUP ID\n\n" +
+            "Nama: " + (message.chat.title || "Chat pribadi") + "\n" +
+            "ID: " + chatId
+          );
+
+          return new Response("OK");
+        }
+
         if (!env.DB) {
           await send(env, chatId, "❌ Database D1 belum terhubung.");
           return new Response("OK");
@@ -270,7 +288,8 @@ export default {
             chatId,
             "BANTUAN ANDROID ZONE\n\n" +
             "/start - Menu utama\n" +
-            "/help - Bantuan\n\n" +
+            "/help - Bantuan\n" +
+            "/id - Menampilkan ID chat atau grup\n\n" +
             "Gunakan menu Cari Aplikasi untuk mencari APK.\n" +
             "Admin dapat mengirim file APK langsung ke bot."
           );
